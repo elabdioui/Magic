@@ -1,9 +1,3 @@
 {
-  "permissions": {
-    "allow": [
-      "PowerShell(cd C:\\\\Users\\\\elabd\\\\Desktop\\\\xauusd-bot; $env:WEBHOOK_HMAC_SECRET=\"3b8020814da5efd055454226d642a9344d1508e07676a2b4cba8a6fb89d893f7\"; python tests/send_mock_signal.py)",
-      "PowerShell($token = \"8050965416:AAF7HF4qL10OQq0ehdGGkRQ-pyHjiLFKjYs\"; Invoke-RestMethod -Uri \"https://api.telegram.org/bot$token/getUpdates\" | ConvertTo-Json -Depth 5)",
-      "PowerShell(Invoke-WebRequest -Uri http://localhost:8000/health -UseBasicParsing -TimeoutSec 5)"
-    ]
-  }
+  "permissions": {}
 }

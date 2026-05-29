@@ -44,12 +44,30 @@ def find_equal_highs_lows(
     return levels
 
 
-def find_swing_liquidity(swings: list[Swing]) -> list[LiquidityLevel]:
-    """Major swing highs = BSL, major swing lows = SSL."""
+def find_swing_liquidity(
+    swings: list[Swing],
+    equal_threshold_pips: float = 0.50,
+) -> list[LiquidityLevel]:
+    """Major swing highs = BSL, major swing lows = SSL.
+    Merges levels within equal_threshold_pips to avoid duplicate sweeps."""
+    pip_unit = 0.10
+    tol = equal_threshold_pips * pip_unit
     levels: list[LiquidityLevel] = []
+
     for s in swings:
         ltype: Literal["BSL", "SSL"] = "BSL" if s.type == "HIGH" else "SSL"
-        levels.append(LiquidityLevel(ltype, s.price, s.time))
+        merged = False
+        for existing in levels:
+            if existing.type == ltype and abs(existing.price - s.price) <= tol:
+                # Keep the more recent level
+                if s.time > existing.time:
+                    existing.price = s.price
+                    existing.time = s.time
+                merged = True
+                break
+        if not merged:
+            levels.append(LiquidityLevel(ltype, s.price, s.time))
+
     return levels
 
 

@@ -70,10 +70,10 @@ def scan_breaker_fib(
 
     confluences = ["Bias_H4", "Breaker_M5"]
     if in_ote:
-        confluences.append("OTE_0.618")
+        confluences.append(f"OTE_{cfg.OTE_LOW}")
 
     score = min(10, len(confluences) * 2)
-    if score < cfg.MIN_CONFLUENCE_SCORE:
+    if score < cfg.MIN_SCORE_B:
         return None
 
     if direction == "LONG":

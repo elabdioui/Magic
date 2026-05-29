@@ -10,7 +10,7 @@ from sqlmodel import Session
 from core.security import require_hmac
 from db.database import get_session
 from models.alert import Alert
-from services.news.aggregator import get_news_context, is_red_news_kill_switch
+from services.news.aggregator import get_news_context, is_red_news_kill_switch, is_orange_news_kill_switch
 from services.llm.router import get_verdict
 from services.telegram.client import send_message
 from services.telegram.formatter import format_alert, format_no_go_news
@@ -41,10 +41,19 @@ async def receive_signal(
         alert = _build_alert(signal, {}, "NO_GO", "Kill-switch news rouge", "", "", "none")
         session.add(alert)
         session.commit()
-        # Still notify on Telegram (blocked message)
         blocked_msg = format_no_go_news(signal, "News rouge dans ≤15min")
         send_message(blocked_msg)
         return {"status": "blocked", "reason": "red_news_kill_switch"}
+
+    # Optional kill-switch: orange news (activated by BLOCK_ORANGE_NEWS=true)
+    if is_orange_news_kill_switch():
+        log.warning("ORANGE NEWS KILL SWITCH — signal rejected")
+        alert = _build_alert(signal, {}, "NO_GO", "Kill-switch news orange", "", "", "none")
+        session.add(alert)
+        session.commit()
+        blocked_msg = format_no_go_news(signal, "News orange USD dans ≤5min")
+        send_message(blocked_msg)
+        return {"status": "blocked", "reason": "orange_news_kill_switch"}
 
     # Enrich with news context
     news_context = get_news_context(window_minutes=60)

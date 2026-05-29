@@ -1,9 +1,7 @@
-"""LLM router: primary (Gemini) → fallback (Groq) → degraded (no verdict)."""
-import asyncio
+"""LLM router: Groq primary → degraded (no verdict) if all fails."""
 import logging
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
-from .gemini import call_gemini
 from .groq import call_groq
 from .prompts import SYSTEM_PROMPT, build_user_prompt
 from core.config import settings
@@ -28,26 +26,12 @@ def _call_with_timeout(fn, *args) -> dict | None:
 def get_verdict(signal: dict, news_context: dict) -> tuple[dict | None, str]:
     """
     Returns (verdict_dict, provider_name).
-    verdict_dict is None if both providers fail.
+    verdict_dict is None if Groq fails (both primary and fallback models).
     """
     user_prompt = build_user_prompt(signal, news_context)
+    result = _call_with_timeout(call_groq, SYSTEM_PROMPT, user_prompt)
+    if result:
+        return result, "groq"
 
-    if settings.LLM_PRIMARY == "gemini":
-        result = _call_with_timeout(call_gemini, SYSTEM_PROMPT, user_prompt)
-        if result:
-            return result, "gemini"
-        log.warning("Gemini failed — trying Groq fallback")
-        result = _call_with_timeout(call_groq, SYSTEM_PROMPT, user_prompt)
-        if result:
-            return result, "groq"
-    else:
-        result = _call_with_timeout(call_groq, SYSTEM_PROMPT, user_prompt)
-        if result:
-            return result, "groq"
-        log.warning("Groq failed — trying Gemini fallback")
-        result = _call_with_timeout(call_gemini, SYSTEM_PROMPT, user_prompt)
-        if result:
-            return result, "gemini"
-
-    log.error("Both LLM providers failed")
+    log.error("Groq LLM failed — returning degraded verdict")
     return None, "none"

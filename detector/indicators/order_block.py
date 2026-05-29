@@ -72,22 +72,26 @@ def detect_order_blocks(df: pd.DataFrame, lookback: int = 30) -> list[OrderBlock
     return obs
 
 
-def update_mitigation(obs: list[OrderBlock], df: pd.DataFrame) -> list[OrderBlock]:
-    """Mark OBs where price has closed through them (mitigated → becomes breaker)."""
+def update_mitigation(obs: list[OrderBlock], df: pd.DataFrame, lookback: int = 5) -> list[OrderBlock]:
+    """Mark OBs where price has closed through them (mitigated → becomes breaker).
+    Scans the last `lookback` candles so re-entries within the window are caught."""
     if df.empty:
         return obs
 
-    last_close = df.iloc[-1]["close"]
+    recent = df.iloc[-lookback:]
 
     for ob in obs:
         if ob.mitigated:
             continue
-        if ob.type == "BULLISH" and last_close < ob.bottom:
-            ob.mitigated = True
-            ob.is_breaker = True   # bullish OB broken → bearish breaker
-        elif ob.type == "BEARISH" and last_close > ob.top:
-            ob.mitigated = True
-            ob.is_breaker = True   # bearish OB broken → bullish breaker
+        for _, row in recent.iterrows():
+            if ob.type == "BULLISH" and row["close"] < ob.bottom:
+                ob.mitigated = True
+                ob.is_breaker = True   # bullish OB broken → bearish breaker
+                break
+            elif ob.type == "BEARISH" and row["close"] > ob.top:
+                ob.mitigated = True
+                ob.is_breaker = True   # bearish OB broken → bullish breaker
+                break
 
     return obs
 

@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 from threading import Lock
 
-from .forex_factory import NewsEvent, fetch_calendar, get_upcoming_us_events, is_red_news_imminent
+from .forex_factory import NewsEvent, fetch_calendar, get_upcoming_us_events, is_red_news_imminent, is_orange_news_imminent
 from .dxy_yields import MacroContext, fetch_macro
 from core.config import settings
 
@@ -67,3 +67,14 @@ def is_red_news_kill_switch(window_minutes: int | None = None) -> bool:
     with _lock:
         events: list[NewsEvent] = _cache["events"]
     return is_red_news_imminent(events, w)
+
+
+def is_orange_news_kill_switch(window_minutes: int | None = None) -> bool:
+    """Optional kill-switch: True if orange US news within the configured window.
+    Only active when BLOCK_ORANGE_NEWS=true in config (default: off)."""
+    if not settings.BLOCK_ORANGE_NEWS:
+        return False
+    w = window_minutes or settings.NEWS_ORANGE_BLOCK_WINDOW_MIN
+    with _lock:
+        events: list[NewsEvent] = _cache["events"]
+    return is_orange_news_imminent(events, w)

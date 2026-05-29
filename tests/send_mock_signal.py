@@ -33,10 +33,10 @@ MOCK_SIGNAL = {
     "estimated_winrate": 0.72,
 }
 
-# Compute HMAC on the exact body that will be sent
-body = json.dumps(MOCK_SIGNAL, default=str)
-payload_bytes = body.encode()
+# Serialize once with sort_keys=True — same logic as detector/webhook.py
+payload_bytes = json.dumps(MOCK_SIGNAL, default=str, sort_keys=True).encode()
 sig = hmac.new(SECRET.encode(), payload_bytes, hashlib.sha256).hexdigest()
+
 headers = {
     "Content-Type": "application/json",
     "X-HMAC-Signature": sig,
@@ -44,7 +44,7 @@ headers = {
 
 print(f"Sending mock Tier S LONG signal to {BACKEND_URL}…")
 try:
-    resp = httpx.post(BACKEND_URL, content=body, headers=headers, timeout=15.0)
+    resp = httpx.post(BACKEND_URL, content=payload_bytes, headers=headers, timeout=15.0)
     print(f"Status: {resp.status_code}")
     print(f"Response: {resp.text}")
 except httpx.RequestError as exc:

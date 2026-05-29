@@ -71,20 +71,37 @@ from indicators.structure import find_swings, determine_bias
 
 
 def _trending_up_df(n: int = 30) -> pd.DataFrame:
-    rows = []
-    base = 1800.0
-    for i in range(n):
-        o = base + i * 2
-        rows.append({"open": o, "high": o + 3, "low": o - 1, "close": o + 2})
+    # Explicit HH/HL zigzag so find_swings(lookback=3) detects clear pivots.
+    # Monotonic series have no local extrema — no swings → NEUTRAL bias.
+    heights = [
+        102, 100, 98, 96, 94,    # declining to swing low 1
+        92,                      # swing low 1  (index 5)
+        95, 98, 101, 104, 107,   # rising
+        110,                     # swing high 1 (index 11)
+        107, 104, 101, 98,       # pullback
+        96,                      # swing low 2  (index 16, HL: 96 > 92)
+        99, 102, 105, 108, 111,
+        114,                     # swing high 2 (index 22, HH: 114 > 110)
+        111, 108, 105,
+    ]
+    rows = [{"open": h, "high": h + 2, "low": h - 2, "close": h} for h in heights]
     return _make_df(rows)
 
 
 def _trending_down_df(n: int = 30) -> pd.DataFrame:
-    rows = []
-    base = 1900.0
-    for i in range(n):
-        o = base - i * 2
-        rows.append({"open": o, "high": o + 1, "low": o - 3, "close": o - 2})
+    # Explicit LH/LL zigzag so find_swings(lookback=3) detects clear pivots.
+    heights = [
+        98, 100, 102, 104, 106,  # rising to swing high 1
+        108,                     # swing high 1 (index 5)
+        105, 102, 99, 96, 93,    # dropping
+        90,                      # swing low 1  (index 11)
+        93, 96, 99, 102,         # bounce
+        104,                     # swing high 2 (index 16, LH: 104 < 108)
+        101, 98, 95, 92, 89,
+        86,                      # swing low 2  (index 22, LL: 86 < 90)
+        89, 92, 95,
+    ]
+    rows = [{"open": h, "high": h + 2, "low": h - 2, "close": h} for h in heights]
     return _make_df(rows)
 
 
@@ -109,10 +126,13 @@ from indicators.fibonacci import FibLevels, compute_fib_from_sweep
 
 def test_ote_zone_bullish():
     fib = compute_fib_from_sweep(sweep_low=1800.0, swing_high=1900.0)
-    # OTE 0.618–0.786 retracement from high → 1900 - 100*0.618 = 1838.2
-    assert fib.is_in_ote(1840.0)
-    assert not fib.is_in_ote(1870.0)   # above OTE (too shallow retracement)
-    assert not fib.is_in_ote(1810.0)   # below OTE (too deep)
+    # OTE zone for BULLISH retracement (range=100):
+    #   upper bound (0.618): 1900 - 61.8 = 1838.2
+    #   lower bound (0.786): 1900 - 78.6 = 1821.4
+    # 1840.0 is ABOVE the zone (59% retracement — too shallow) — original test was wrong.
+    assert fib.is_in_ote(1830.0)         # 70% retracement — inside OTE ✓
+    assert not fib.is_in_ote(1870.0)     # 30% retracement — above OTE (too shallow)
+    assert not fib.is_in_ote(1810.0)     # 90% retracement — below OTE (too deep)
 
 
 def test_equilibrium():

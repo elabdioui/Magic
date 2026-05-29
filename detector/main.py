@@ -4,7 +4,7 @@ Boucle de scan toutes les N secondes, envoie les signaux au backend via webhook.
 """
 import logging
 import sys
-import time
+from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 
 import pytz
@@ -24,7 +24,12 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("logs/detector.log", encoding="utf-8"),
+        RotatingFileHandler(
+            "logs/detector.log",
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+            encoding="utf-8",
+        ),
     ],
 )
 log = logging.getLogger("detector.main")

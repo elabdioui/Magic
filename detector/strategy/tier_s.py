@@ -54,7 +54,7 @@ def _score_confluences(confluences: list[str]) -> int:
         "OB_H1": 2, "OB_M5": 1,
         "SSL_Sweep": 2, "BSL_Sweep": 2,
         "CHoCH_M5": 2, "CHoCH_M1": 1,
-        "OTE_0.618": 1, "OTE_0.786": 1,
+        f"OTE_{cfg.OTE_LOW}": 1, f"OTE_{cfg.OTE_HIGH}": 1,
         "Bias_H4": 1, "Bias_H1": 1,
     }
     return min(10, sum(weights.get(c, 1) for c in confluences))
@@ -97,7 +97,7 @@ def scan_golden_setup(
 
     # 3. M5: recent SSL sweep (LONG) or BSL sweep (SHORT)
     m5_swings = find_swings(m5, lookback=cfg.SWING_LOOKBACK)
-    liq_levels = find_swing_liquidity(m5_swings)
+    liq_levels = find_swing_liquidity(m5_swings, equal_threshold_pips=cfg.LIQUIDITY_EQUAL_THRESHOLD)
     liq_levels = detect_sweeps(m5, liq_levels, lookback_candles=10)
 
     sweep_type = "SSL" if direction == "LONG" else "BSL"
@@ -106,10 +106,15 @@ def scan_golden_setup(
         log.debug("No %s sweep found on M5 — Tier S skip", sweep_type)
         return None
 
-    # 4. CHoCH on M5 after the sweep
+    # 4. CHoCH on M5 after the sweep — temporal order enforced
     choch = get_recent_choch(m5, m5_swings, h1_bias, lookback_candles=15)  # type: ignore[arg-type]
     if choch is None or choch.direction != expected_bias:
         log.debug("No CHoCH %s on M5 — Tier S skip", expected_bias)
+        return None
+
+    if recent_sweep.sweep_time is not None and choch.time <= recent_sweep.sweep_time:
+        log.debug("CHoCH (%s) not after sweep (%s) — temporal order violated, Tier S skip",
+                  choch.time, recent_sweep.sweep_time)
         return None
 
     # 5. FVG on M5/M1 (look in last 20 candles post-sweep)
@@ -121,7 +126,7 @@ def scan_golden_setup(
 
     # 6. OB on M5/H1
     m5_obs = detect_order_blocks(m5.iloc[-50:], lookback=cfg.OB_LOOKBACK)
-    m5_obs = update_mitigation(m5_obs, m5)
+    m5_obs = update_mitigation(m5_obs, m5, lookback=cfg.OB_MITIGATION_LOOKBACK)
     ob_dir = "BULLISH" if direction == "LONG" else "BEARISH"
     nearest_ob = get_nearest_ob(m5_obs, current_price, ob_dir)
 
@@ -135,14 +140,14 @@ def scan_golden_setup(
         sweep_low = recent_sweep.price
         if swing_h is None:
             return None
-        fib = compute_fib_from_sweep(sweep_low, swing_h)
+        fib = compute_fib_from_sweep(sweep_low, swing_h, ote_low=cfg.OTE_LOW, ote_high=cfg.OTE_HIGH)
     else:
         swing_l = min((s.price for s in m5_swings if s.type == "LOW"), default=None)
         sweep_high = recent_sweep.price
         if swing_l is None:
             return None
         from indicators.fibonacci import compute_fib_from_sweep_bearish
-        fib = compute_fib_from_sweep_bearish(sweep_high, swing_l)
+        fib = compute_fib_from_sweep_bearish(sweep_high, swing_l, ote_low=cfg.OTE_LOW, ote_high=cfg.OTE_HIGH)
 
     in_ote = fib.is_in_ote(current_price)
 
@@ -151,12 +156,18 @@ def scan_golden_setup(
         best_fvg = recent_fvgs[-1]
         entry_low = best_fvg.bottom
         entry_high = best_fvg.top
-        entry_tag = f"FVG_M5"
+        entry_tag = "FVG_M5"
     elif nearest_ob:
         entry_low = nearest_ob.bottom
         entry_high = nearest_ob.top
-        entry_tag = f"OB_M5"
+        entry_tag = "OB_M5"
     else:
+        return None
+
+    # Price must be in the entry zone or in OTE — avoids signalling when price is far away
+    if not (entry_low <= current_price <= entry_high) and not in_ote:
+        log.debug("Price %.2f not in entry zone [%.2f-%.2f] and not in OTE — Tier S skip",
+                  current_price, entry_low, entry_high)
         return None
 
     # Confluences list
@@ -167,12 +178,16 @@ def scan_golden_setup(
         entry_tag,
     ]
     if in_ote:
-        ote_label = "OTE_0.618" if abs(current_price - fib.level(0.618)) < abs(current_price - fib.level(0.786)) else "OTE_0.786"
+        ote_label = (
+            f"OTE_{cfg.OTE_LOW}"
+            if abs(current_price - fib.level(cfg.OTE_LOW)) < abs(current_price - fib.level(cfg.OTE_HIGH))
+            else f"OTE_{cfg.OTE_HIGH}"
+        )
         confluences.append(ote_label)
 
     score = _score_confluences(confluences)
-    if score < cfg.MIN_CONFLUENCE_SCORE:
-        log.debug("Score %d < min %d — Tier S skip", score, cfg.MIN_CONFLUENCE_SCORE)
+    if score < cfg.MIN_SCORE_S:
+        log.debug("Score %d < MIN_SCORE_S %d — Tier S skip", score, cfg.MIN_SCORE_S)
         return None
 
     # 9. SL / TP

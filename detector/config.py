@@ -1,7 +1,10 @@
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+# Load .env from root (VPS mono-machine) then fall back to local detector/.env
+_root_env = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=_root_env if _root_env.exists() else None)
 
 
 class Config:
@@ -31,12 +34,17 @@ class Config:
 
     # ICT params
     FVG_MIN_SIZE_PIPS: float = 3.0      # minimum FVG size (XAUUSD pip = 0.1)
-    OB_LOOKBACK: int = 30               # candles to look back for OB
+    OB_LOOKBACK: int = 30               # candles to look back for OB detection
+    OB_MITIGATION_LOOKBACK: int = 5     # candles to scan for OB mitigation
     SWING_LOOKBACK: int = 5             # candles each side for swing detection
-    OTE_LOW: float = 0.618
-    OTE_HIGH: float = 0.786
+    OTE_LOW: float = 0.618              # shallow OTE boundary (Fibonacci ratio)
+    OTE_HIGH: float = 0.786             # deep OTE boundary   (Fibonacci ratio)
     LIQUIDITY_EQUAL_THRESHOLD: float = 0.50  # pips, equal high/low tolerance
-    MIN_CONFLUENCE_SCORE: int = 4       # minimum score to send alert
+    # Per-tier minimum confluence scores (old MIN_CONFLUENCE_SCORE=4 kept as fallback)
+    MIN_CONFLUENCE_SCORE: int = 4
+    MIN_SCORE_S: int = 7   # Tier S: requires strong confluences
+    MIN_SCORE_A: int = 5   # Tier A: moderate
+    MIN_SCORE_B: int = 4   # Tier B: baseline
 
 
 cfg = Config()

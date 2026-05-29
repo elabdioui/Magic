@@ -74,16 +74,16 @@ SAMPLE_VERDICT = {
 
 
 def test_format_alert_contains_tier():
-    msg = format_alert(SAMPLE_SIGNAL, SAMPLE_VERDICT, "gemini")
+    msg = format_alert(SAMPLE_SIGNAL, SAMPLE_VERDICT, "groq")
     assert "TIER S" in msg
     assert "LONG" in msg
     assert "Golden Setup" in msg
 
 
 def test_format_alert_contains_verdict():
-    msg = format_alert(SAMPLE_SIGNAL, SAMPLE_VERDICT, "gemini")
+    msg = format_alert(SAMPLE_SIGNAL, SAMPLE_VERDICT, "groq")
     assert "GO" in msg
-    assert "gemini" in msg
+    assert "groq" in msg
 
 
 def test_format_alert_no_verdict():
@@ -157,3 +157,44 @@ def test_prompt_warns_red_news():
     }
     prompt = build_user_prompt(SAMPLE_SIGNAL, news_ctx)
     assert "OUI" in prompt or "BLOQUE" in prompt
+
+
+# ── HMAC integration test: detector signing ↔ backend verification ────────────
+
+import json as _json
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "detector"))
+os.environ.setdefault("BACKEND_WEBHOOK_URL", "http://localhost:8000/signal")
+os.environ.setdefault("MT5_LOGIN", "0")
+os.environ.setdefault("MT5_PASSWORD", "")
+os.environ.setdefault("MT5_SERVER", "")
+
+from webhook import _sign as detector_sign
+
+_INTEGRATION_SECRET = "test-secret-32chars-aaaaaaaaaaaa"
+
+INTEGRATION_SIGNAL = {
+    "tier": "S",
+    "direction": "LONG",
+    "pattern": "Golden Setup",
+    "confluence_score": 9,
+}
+
+
+def test_detector_sign_matches_backend_verify():
+    """Detector signs with sort_keys=True; backend verify_hmac must accept it."""
+    payload_bytes = _json.dumps(INTEGRATION_SIGNAL, default=str, sort_keys=True).encode()
+    sig = detector_sign(payload_bytes, _INTEGRATION_SECRET)
+    os.environ["WEBHOOK_HMAC_SECRET"] = _INTEGRATION_SECRET
+    from core.security import verify_hmac
+    assert verify_hmac(payload_bytes, sig) is True
+
+
+def test_tampered_body_rejected_by_backend():
+    """Mutating the body after signing must fail verification."""
+    payload_bytes = _json.dumps(INTEGRATION_SIGNAL, default=str, sort_keys=True).encode()
+    sig = detector_sign(payload_bytes, _INTEGRATION_SECRET)
+    tampered = _json.dumps({**INTEGRATION_SIGNAL, "tier": "B"}, default=str, sort_keys=True).encode()
+    os.environ["WEBHOOK_HMAC_SECRET"] = _INTEGRATION_SECRET
+    from core.security import verify_hmac
+    assert verify_hmac(tampered, sig) is False

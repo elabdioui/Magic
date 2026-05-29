@@ -3,7 +3,6 @@ import hashlib
 import hmac
 import json
 import logging
-import time
 
 import httpx
 
@@ -18,14 +17,13 @@ def _sign(payload_bytes: bytes, secret: str) -> str:
 
 def send_signal(signal_dict: dict) -> bool:
     """
-    Serialize the signal dict to JSON, sign it, and POST to the backend.
-    Returns True on HTTP 2xx, False otherwise.
+    Serialize the signal dict to JSON (sort_keys=True for deterministic encoding),
+    sign the exact bytes, and POST those exact bytes to the backend.
+    The signature is transported only via X-HMAC-Signature header — never mutated
+    into signal_dict so the signed bytes == the sent bytes.
     """
-    payload_bytes = json.dumps(signal_dict, default=str).encode()
+    payload_bytes = json.dumps(signal_dict, default=str, sort_keys=True).encode()
     signature = _sign(payload_bytes, cfg.WEBHOOK_HMAC_SECRET)
-    signal_dict["signature"] = signature
-
-    body = json.dumps(signal_dict, default=str)
 
     headers = {
         "Content-Type": "application/json",
@@ -34,7 +32,7 @@ def send_signal(signal_dict: dict) -> bool:
 
     try:
         with httpx.Client(timeout=10.0) as client:
-            resp = client.post(cfg.BACKEND_WEBHOOK_URL, content=body, headers=headers)
+            resp = client.post(cfg.BACKEND_WEBHOOK_URL, content=payload_bytes, headers=headers)
         if resp.is_success:
             log.info("Signal sent OK — tier=%s dir=%s score=%s",
                      signal_dict.get("tier"), signal_dict.get("direction"),

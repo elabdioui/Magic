@@ -68,7 +68,7 @@ def scan_ob_retest(
         confluences.append("FVG_M5")
 
     score = min(10, len(confluences) * 2)
-    if score < cfg.MIN_CONFLUENCE_SCORE:
+    if score < cfg.MIN_SCORE_A:
         return None
 
     h1_swings = find_swings(h1, lookback=cfg.SWING_LOOKBACK)

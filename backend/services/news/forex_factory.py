@@ -137,3 +137,7 @@ def get_upcoming_us_events(
 
 def is_red_news_imminent(events: list[NewsEvent], window_minutes: int = 15) -> bool:
     return any(e.is_us_red and 0 <= e.minutes_from_now <= window_minutes for e in events)
+
+
+def is_orange_news_imminent(events: list[NewsEvent], window_minutes: int = 5) -> bool:
+    return any(e.is_us_orange and 0 <= e.minutes_from_now <= window_minutes for e in events)

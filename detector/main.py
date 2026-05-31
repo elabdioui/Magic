@@ -3,6 +3,7 @@ XAUUSD ICT Bot — Nœud 1 Détecteur (Windows MT5)
 Boucle de scan toutes les N secondes, envoie les signaux au backend via webhook.
 """
 import logging
+import os
 import sys
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
@@ -18,6 +19,8 @@ from strategy import (
     is_in_killzone, minutes_to_next_killzone, get_active_killzone,
 )
 from webhook import send_signal
+
+os.makedirs("logs", exist_ok=True)
 
 logging.basicConfig(
     level=cfg.LOG_LEVEL,

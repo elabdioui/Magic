@@ -5,6 +5,7 @@ Boucle de scan toutes les N secondes, envoie les signaux au backend via webhook.
 import logging
 import os
 import sys
+import time
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
 
@@ -144,6 +145,16 @@ def scan_once() -> None:
         log.debug("No valid signal this scan")
 
 
+def heartbeat() -> None:
+    now_utc = datetime.now(tz=timezone.utc)
+    kz = get_active_killzone(now_utc)
+    mins = minutes_to_next_killzone(now_utc)
+    log.info(
+        "HEARTBEAT — alive | mt5_connected=%s | killzone=%s | next_kz_in=%dmin",
+        mt5.is_connected(), kz, mins,
+    )
+
+
 def main() -> None:
     import os
     os.makedirs("logs", exist_ok=True)
@@ -152,8 +163,18 @@ def main() -> None:
     log.info("Symbol=%s  Tiers=%s  Killzones=%s  Interval=%ds",
              cfg.SYMBOL, cfg.ENABLED_TIERS, cfg.ENABLED_KILLZONES, cfg.SCAN_INTERVAL_SECONDS)
 
-    if not mt5.connect():
-        log.critical("Initial MT5 connection failed — exiting")
+    connected = False
+    for i in range(1, cfg.MT5_INIT_RETRIES + 1):
+        if mt5.connect():
+            connected = True
+            break
+        log.warning("MT5 not ready — retry %d/%d in %ds",
+                    i, cfg.MT5_INIT_RETRIES, cfg.MT5_INIT_RETRY_DELAY_SECONDS)
+        time.sleep(cfg.MT5_INIT_RETRY_DELAY_SECONDS)
+
+    if not connected:
+        log.critical("Initial MT5 connection failed after %d retries — exiting",
+                     cfg.MT5_INIT_RETRIES)
         sys.exit(1)
 
     scheduler = BlockingScheduler(timezone=pytz.utc)
@@ -164,6 +185,7 @@ def main() -> None:
         id="scan",
         next_run_time=datetime.now(tz=pytz.utc),
     )
+    scheduler.add_job(heartbeat, "interval", minutes=cfg.HEARTBEAT_MINUTES, id="heartbeat")
 
     log.info("Scheduler started — scanning every %ds", cfg.SCAN_INTERVAL_SECONDS)
     try:

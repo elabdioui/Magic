@@ -11,6 +11,10 @@ class Config:
     MT5_LOGIN: int = int(os.getenv("MT5_LOGIN", "0"))
     MT5_PASSWORD: str = os.getenv("MT5_PASSWORD", "")
     MT5_SERVER: str = os.getenv("MT5_SERVER", "")
+    MT5_PATH: str = os.getenv("MT5_PATH", "")
+    MT5_INIT_RETRIES: int = int(os.getenv("MT5_INIT_RETRIES", "10"))
+    MT5_INIT_RETRY_DELAY_SECONDS: int = int(os.getenv("MT5_INIT_RETRY_DELAY_SECONDS", "30"))
+    HEARTBEAT_MINUTES: int = int(os.getenv("HEARTBEAT_MINUTES", "15"))
 
     SYMBOL: str = os.getenv("SYMBOL", "XAUUSD")
     SCAN_INTERVAL_SECONDS: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))

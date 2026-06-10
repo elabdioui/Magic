@@ -18,14 +18,30 @@ _TIMEFRAME_MAP = {
 
 
 def connect() -> bool:
-    if not mt5.initialize(login=cfg.MT5_LOGIN, password=cfg.MT5_PASSWORD, server=cfg.MT5_SERVER):
-        log.error("MT5 init failed: %s", mt5.last_error())
+    init_kwargs = {
+        "login": cfg.MT5_LOGIN,
+        "password": cfg.MT5_PASSWORD,
+        "server": cfg.MT5_SERVER,
+    }
+    if cfg.MT5_PATH:
+        init_kwargs["path"] = cfg.MT5_PATH
+
+    if not mt5.initialize(**init_kwargs):
+        err = mt5.last_error()
+        log.error("MT5 init failed — code=%s msg=%s", err[0], err[1])
         return False
+
     if not mt5.symbol_select(cfg.SYMBOL, True):
         log.error("symbol_select(%s) failed: %s", cfg.SYMBOL, mt5.last_error())
         return False
+
     acc = mt5.account_info()
-    log.info("MT5 connected — account=%s", acc.login if acc else None)
+    if acc is None:
+        log.error("MT5 init succeeded but account_info() is None — terminal not logged in")
+        mt5.shutdown()
+        return False
+
+    log.info("MT5 connected — account=%s", acc.login)
     return True
 
 

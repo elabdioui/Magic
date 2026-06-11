@@ -93,7 +93,11 @@ def scan_ob_retest(
     # H1 OB near current price — mitigation scans full H1 df to avoid treating
     # yesterday's invalidated OBs as fresh (default lookback=5 only covers 5h).
     h1_obs = detect_order_blocks(h1, lookback=cfg.OB_LOOKBACK)
-    h1_obs = update_mitigation(h1_obs, h1, lookback=len(h1))
+    # BUGFIX: mitigation is evaluated on CLOSED candles only (exclude the forming
+    # candle). Otherwise the forming candle entering the OB sets touched=True and
+    # get_nearest_ob excludes the very OB whose retest we are trying to signal.
+    h1_closed = h1.iloc[:-1]
+    h1_obs = update_mitigation(h1_obs, h1_closed, lookback=len(h1_closed))
     ob_dir = "BULLISH" if direction == "LONG" else "BEARISH"
     ob = get_nearest_ob(h1_obs, current_price, ob_dir)
     if ob is None:
@@ -312,19 +316,24 @@ def scan_sfp_asia(
     if "volume" not in m15.columns or confirm["volume"] <= cfg.SFP_VOLUME_FACTOR * avg_vol:
         return None
 
-    # OTE filter on the recent M15 leg (HTF proxy).
+    # OTE filter: the sweep wick must sit in the OTE (0.618–0.786) retracement of
+    # the recent M15 leg. BUGFIX: the fib was previously anchored on the Asia
+    # extreme itself, putting the OTE zone strictly inside the range while the
+    # sweep wick is by definition beyond it — the check could never pass.
+    # The leg is now defined by the M15 swing extremes (leg low → leg high).
     m15_swings = find_swings(m15, lookback=cfg.SWING_LOOKBACK)
     current_price = m5.iloc[-1]["close"]
+    swing_h = max((s.price for s in m15_swings if s.type == "HIGH"), default=None)
+    swing_l = min((s.price for s in m15_swings if s.type == "LOW"), default=None)
+    if swing_h is None or swing_l is None or swing_h <= swing_l:
+        return None
+
     if direction == "LONG":
-        swing_h = max((s.price for s in m15_swings if s.type == "HIGH"), default=None)
-        if swing_h is None:
-            return None
-        fib = compute_fib_from_sweep(asia_low, swing_h, ote_low=cfg.OTE_LOW, ote_high=cfg.OTE_HIGH)
+        # Up-leg swing_l → swing_h; sweep wick must be a 0.618–0.786 retracement.
+        fib = compute_fib_from_sweep(swing_l, swing_h, ote_low=cfg.OTE_LOW, ote_high=cfg.OTE_HIGH)
     else:
-        swing_l = min((s.price for s in m15_swings if s.type == "LOW"), default=None)
-        if swing_l is None:
-            return None
-        fib = compute_fib_from_sweep_bearish(asia_high, swing_l, ote_low=cfg.OTE_LOW, ote_high=cfg.OTE_HIGH)
+        # Down-leg swing_h → swing_l; sweep wick must be a 0.618–0.786 retracement.
+        fib = compute_fib_from_sweep_bearish(swing_h, swing_l, ote_low=cfg.OTE_LOW, ote_high=cfg.OTE_HIGH)
 
     if not fib.is_in_ote(sweep_wick):
         return None

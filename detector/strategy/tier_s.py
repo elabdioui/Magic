@@ -20,7 +20,7 @@ import pandas as pd
 from indicators import (
     detect_fvg, filter_unfilled_fvg, get_recent_fvg,
     detect_order_blocks, update_mitigation, get_nearest_ob,
-    find_swings, determine_bias, get_recent_choch,
+    find_swings, determine_bias, get_recent_choch, get_recent_structure_break,
     find_swing_liquidity, detect_sweeps, get_recent_sweep,
     compute_fib_from_sweep,
 )
@@ -116,10 +116,14 @@ def scan_golden_setup(
         log.debug("No %s sweep found on M5 — Tier S skip", sweep_type)
         return None
 
-    # 4. CHoCH on M5 after the sweep — temporal order enforced
-    choch = get_recent_choch(m5, m5_swings, h1_bias, lookback_candles=15)  # type: ignore[arg-type]
-    if choch is None or choch.direction != expected_bias:
-        log.debug("No CHoCH %s on M5 — Tier S skip", expected_bias)
+    # 4. M5 structural shift in trade direction AFTER the sweep.
+    #    ICT semantics: after the SSL sweep the local M5 leg is counter-trend;
+    #    the reversal break is a CHoCH relative to that LOCAL leg. Relative to the
+    #    (already aligned) H1 bias the same break is labeled BOS — so we must not
+    #    require the "CHoCH" label, only the break direction.
+    choch = get_recent_structure_break(m5, m5_swings, expected_bias, lookback_candles=15)
+    if choch is None:
+        log.debug("No %s structure break on M5 — Tier S skip", expected_bias)
         return None
 
     # BUGFIX: normalize both datetimes before comparing (see _to_comparable_dt).
@@ -137,9 +141,12 @@ def scan_golden_setup(
     m5_fvgs = filter_unfilled_fvg(m5_fvgs, current_price)
     recent_fvgs = get_recent_fvg(m5_fvgs, fvg_dir, n=3)
 
-    # 6. OB on M5/H1 — mitigation scans the full M5 df to catch OBs hit hours ago
+    # 6. OB on M5/H1 — mitigation scans closed candles only (exclude the forming
+    # candle). Otherwise the forming candle entering the OB sets touched=True and
+    # get_nearest_ob excludes the very OB whose retest we are trying to signal.
     m5_obs = detect_order_blocks(m5.iloc[-50:], lookback=cfg.OB_LOOKBACK)
-    m5_obs = update_mitigation(m5_obs, m5, lookback=len(m5))
+    m5_closed = m5.iloc[:-1]
+    m5_obs = update_mitigation(m5_obs, m5_closed, lookback=len(m5_closed))
     ob_dir = "BULLISH" if direction == "LONG" else "BEARISH"
     nearest_ob = get_nearest_ob(m5_obs, current_price, ob_dir)
 

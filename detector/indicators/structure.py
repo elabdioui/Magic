@@ -131,8 +131,33 @@ def get_recent_choch(
     bias: Literal["BULLISH", "BEARISH", "NEUTRAL"],
     lookback_candles: int = 20,
 ) -> StructureBreak | None:
-    """Return the most recent CHoCH in the last N candles, if any."""
-    recent_df = df.iloc[-lookback_candles:]
-    breaks = detect_structure_breaks(recent_df, swings, bias)
-    chochs = [b for b in breaks if b.type == "CHoCH"]
+    """Return the most recent CHoCH within the last N candles, if any.
+
+    BUGFIX: previously sliced df.iloc[-lookback_candles:] while swings carried
+    full-df positional indices, so breaks were almost never detected. Now runs
+    on the full df and filters recency by candle_idx.
+    """
+    breaks = detect_structure_breaks(df, swings, bias)
+    cutoff = max(0, len(df) - lookback_candles)
+    chochs = [b for b in breaks if b.type == "CHoCH" and b.candle_idx >= cutoff]
     return chochs[-1] if chochs else None
+
+
+def get_recent_structure_break(
+    df: pd.DataFrame,
+    swings: list[Swing],
+    direction: Literal["BULLISH", "BEARISH"],
+    lookback_candles: int = 15,
+) -> StructureBreak | None:
+    """
+    Most recent structure break (BOS or CHoCH — label irrelevant) in the given
+    direction, occurring within the last `lookback_candles` candles of `df`.
+
+    IMPORTANT: detect_structure_breaks is called on the FULL df so that
+    swing.index values (positional indices into the full df) stay aligned
+    with the loop index. Recency is filtered afterwards via candle_idx.
+    """
+    breaks = detect_structure_breaks(df, swings, current_bias="NEUTRAL")
+    cutoff = max(0, len(df) - lookback_candles)
+    recent = [b for b in breaks if b.direction == direction and b.candle_idx >= cutoff]
+    return recent[-1] if recent else None

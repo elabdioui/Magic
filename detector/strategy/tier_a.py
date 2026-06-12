@@ -1,8 +1,9 @@
-"""Tier A setups: OB Retest + London Open Sweep."""
+"""Tier A setups: OB Retest + Asia Fade."""
 import logging
 import pandas as pd
 import pytz
 
+import stats
 from indicators import (
     detect_fvg, filter_unfilled_fvg, get_recent_fvg,
     detect_order_blocks, update_mitigation, get_nearest_ob,
@@ -17,6 +18,8 @@ from config import cfg
 log = logging.getLogger(__name__)
 
 _NY_TZ = pytz.timezone("America/New_York")
+
+_PIP = 0.10  # XAUUSD pip unit
 
 
 def get_asia_range(m15: pd.DataFrame) -> tuple[float | None, float | None]:
@@ -61,6 +64,16 @@ def get_asia_range(m15: pd.DataFrame) -> tuple[float | None, float | None]:
     return float(asia_df["high"].max()), float(asia_df["low"].min())
 
 
+def _avg_volume(df: pd.DataFrame, lookback: int) -> float | None:
+    """Mean volume of the `lookback` candles BEFORE the last one. None if unavailable."""
+    if "volume" not in df.columns or len(df) < lookback + 1:
+        return None
+    window = df["volume"].iloc[-(lookback + 1):-1]
+    if window.empty:
+        return None
+    return float(window.mean())
+
+
 def scan_ob_retest(
     tf_data: dict[str, pd.DataFrame],
     direction: str = "LONG",
@@ -72,20 +85,26 @@ def scan_ob_retest(
     - Price returns to H1 OB zone
     - M5 confirmation: BOS or FVG
     """
+    _S = "scan_ob_retest"
     h1 = tf_data.get("H1")
     h4 = tf_data.get("H4")
     m5 = tf_data.get("M5")
     if h1 is None or h4 is None or m5 is None or h1.empty or m5.empty or h4.empty:
+        stats.record(_S, "no_data")
         return None
 
     killzone = get_active_killzone()
     if killzone is None:
+        log.debug("No killzone — OB Retest skip")
+        stats.record(_S, "no_killzone")
         return None
 
     h4_swings = find_swings(h4, lookback=cfg.SWING_LOOKBACK)
     h4_bias = determine_bias(h4_swings)
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
     if h4_bias != expected:
+        log.debug("H4 bias %s ≠ %s — OB Retest skip", h4_bias, expected)
+        stats.record(_S, "h4_bias_mismatch")
         return None
 
     current_price = m5.iloc[-1]["close"]
@@ -101,12 +120,16 @@ def scan_ob_retest(
     ob_dir = "BULLISH" if direction == "LONG" else "BEARISH"
     ob = get_nearest_ob(h1_obs, current_price, ob_dir)
     if ob is None:
+        log.debug("No H1 OB near price — OB Retest skip")
+        stats.record(_S, "no_ob")
         return None
 
     # Price must be inside or just touching the OB
     margin = (ob.top - ob.bottom) * 0.3
     in_zone = (ob.bottom - margin) <= current_price <= (ob.top + margin)
     if not in_zone:
+        log.debug("Price %.2f outside OB zone — OB Retest skip", current_price)
+        stats.record(_S, "price_outside_ob")
         return None
 
     # M5 FVG as confirmation
@@ -121,6 +144,8 @@ def scan_ob_retest(
 
     score = _score_confluences(confluences)
     if score < cfg.MIN_SCORE_A:
+        log.debug("Score %d < MIN_SCORE_A %d — OB Retest skip", score, cfg.MIN_SCORE_A)
+        stats.record(_S, "score_below_min")
         return None
 
     h1_swings = find_swings(h1, lookback=cfg.SWING_LOOKBACK)
@@ -135,8 +160,11 @@ def scan_ob_retest(
     entry_ref = ob.top if direction == "LONG" else ob.bottom
     rr = _safe_rr(target_tp, entry_ref, sl)
     if rr is None or rr < cfg.MIN_RR:
+        log.debug("RR %.2f < MIN_RR %.1f — OB Retest skip", rr or 0, cfg.MIN_RR)
+        stats.record(_S, "rr_below_min")
         return None
 
+    stats.record(_S, "EMIT")
     return {
         "tier": "A",
         "direction": direction,
@@ -154,236 +182,183 @@ def scan_ob_retest(
     }
 
 
-def scan_london_sweep(
+def scan_asia_fade(
     tf_data: dict[str, pd.DataFrame],
     direction: str = "LONG",
 ) -> dict | None:
     """
-    London Open Sweep:
-    - London killzone only
-    - Sweep of Asia range high/low
-    - FVG forms post-sweep
+    Asia Fade: sweep of Asia session extreme, then fade back inside the range.
+
+    Hard gates:
+      1. Active killzone in {LONDON, NY_AM}
+      2. Asia range >= ASIA_MIN_RANGE_PIPS
+      3. Sweep of Asia extreme in last 20 closed M5 candles + close back inside
+      4. Current price back inside Asia range
+      5. Worst-case RR >= MIN_RR_A
+      6. score >= MIN_SCORE_A
+
+    Soft confluences (never gate):
+      Asia_Sweep, Bias_H4, SFP_Wick (M15), Volume_Spike (M15), FVG_M5
     """
-    killzone = get_active_killzone()
-    if killzone != "LONDON":
-        return None
+    _S = "scan_asia_fade"
 
-    m15 = tf_data.get("M15")
-    m5 = tf_data.get("M5")
-    h4 = tf_data.get("H4")
-    if m15 is None or m5 is None or h4 is None or m15.empty or m5.empty or h4.empty:
-        return None
-
-    h4_swings = find_swings(h4, lookback=cfg.SWING_LOOKBACK)
-    h4_bias = determine_bias(h4_swings)
-    expected = "BULLISH" if direction == "LONG" else "BEARISH"
-    if h4_bias != expected:
-        return None
-
-    # BUGFIX: Asia range now computed from timestamps (20:00–00:00 NY), not iloc.
-    asia_high, asia_low = get_asia_range(m15)
-    if asia_high is None or asia_low is None:
-        log.debug("No valid Asia range — London Sweep skip")
-        return None
-
-    current_price = m5.iloc[-1]["close"]
-
-    if direction == "LONG":
-        # Expect sweep of Asia low (SSL)
-        swept = m5.iloc[-10:]["low"].min() < asia_low and current_price > asia_low
-        if not swept:
-            return None
-        sweep_extreme = asia_low
-    else:
-        swept = m5.iloc[-10:]["high"].max() > asia_high and current_price < asia_high
-        if not swept:
-            return None
-        sweep_extreme = asia_high
-
-    m5_fvgs = detect_fvg(m5.iloc[-20:], min_size_pips=cfg.FVG_MIN_SIZE_PIPS)
-    fvg_dir = "BULLISH" if direction == "LONG" else "BEARISH"
-    m5_fvgs = filter_unfilled_fvg(m5_fvgs, current_price)
-    recent_fvgs = get_recent_fvg(m5_fvgs, fvg_dir, n=2)
-
-    if not recent_fvgs:
-        return None
-
-    best_fvg = recent_fvgs[-1]
-    confluences = ["Bias_H4", "Asia_Sweep", "FVG_M5"]
-    score = _score_confluences(confluences)
-
-    if direction == "LONG":
-        sl = sweep_extreme - 3 * 0.10
-        target_tp = asia_high
-    else:
-        sl = sweep_extreme + 3 * 0.10
-        target_tp = asia_low
-
-    entry_ref = best_fvg.top if direction == "LONG" else best_fvg.bottom
-    rr = _safe_rr(target_tp, entry_ref, sl)
-    if rr is None or rr < cfg.MIN_RR:
-        return None
-
-    return {
-        "tier": "A",
-        "direction": direction,
-        "pattern": "London Open Sweep",
-        "killzone": killzone,
-        "entry_zone_low": round(best_fvg.bottom, 2),
-        "entry_zone_high": round(best_fvg.top, 2),
-        "stop_loss": round(sl, 2),
-        "take_profit": round(target_tp, 2),
-        "bias_h4": h4_bias,
-        "bias_h1": expected,
-        "confluences": confluences,
-        "confluence_score": score,
-        "estimated_winrate": 0.60,
-    }
-    
-# ──────────────────────────────────────────────────────────────────────────────
-# SFP (Swing Failure Pattern) at Asia range extreme + OTE + volume confirmation
-# ──────────────────────────────────────────────────────────────────────────────
-
-def _avg_volume(df: pd.DataFrame, lookback: int) -> float | None:
-    """Mean volume of the `lookback` candles BEFORE the last one. None if unavailable."""
-    if "volume" not in df.columns or len(df) < lookback + 1:
-        return None
-    window = df["volume"].iloc[-(lookback + 1):-1]
-    if window.empty:
-        return None
-    return float(window.mean())
-
-
-def scan_sfp_asia(
-    tf_data: dict[str, pd.DataFrame],
-    direction: str = "LONG",
-) -> dict | None:
-    """
-    SFP Asia + OTE (document Setup 3, tightened):
-    - Active killzone LONDON or NY_AM
-    - H4 bias aligned
-    - Confirmation candle (M15) wicks BEYOND the Asia extreme but CLOSES back inside
-    - Reintegration candle volume > factor * average of previous N candles
-    - The sweep occurs within OTE (0.618–0.786) of the recent M15 leg (HTF proxy)
-    - RR target 2.5–3.0 (reject < 2.0)
-
-    NOTE: the OTE "daily leg" from the doc is approximated by the most recent M15
-    swing leg, since clean D1 legs are not always available. Documented approximation.
-    estimated_winrate = 0.65 is UNVALIDATED — needs backtest before trusting it.
-    """
+    # Hard gate 1
     killzone = get_active_killzone()
     if killzone not in ("LONDON", "NY_AM"):
+        stats.record(_S, "no_killzone")
         return None
 
     m15 = tf_data.get("M15")
     m5 = tf_data.get("M5")
     h4 = tf_data.get("H4")
     if m15 is None or m5 is None or h4 is None or m15.empty or m5.empty or h4.empty:
+        stats.record(_S, "no_data")
         return None
+
+    # Hard gate 2: Asia range size
+    asia_high, asia_low = get_asia_range(m15)
+    if asia_high is None or asia_low is None:
+        log.debug("No valid Asia range — Asia Fade skip")
+        stats.record(_S, "no_asia_range")
+        return None
+
+    if (asia_high - asia_low) < cfg.ASIA_MIN_RANGE_PIPS * _PIP:
+        log.debug("Asia range %.2f < %.1f pips — Asia Fade skip",
+                  asia_high - asia_low, cfg.ASIA_MIN_RANGE_PIPS)
+        stats.record(_S, "range_too_small")
+        return None
+
+    current_price = float(m5.iloc[-1]["close"])
+    m5_closed = m5.iloc[:-1]
+    lookback = min(20, len(m5_closed))
+    recent_m5 = m5_closed.iloc[-lookback:]
+
+    # Hard gate 3: sweep of Asia extreme (last 20 closed M5) + close back inside
+    found_sweep = False
+    sweep_extreme: float | None = None
+    close_back = False
+
+    for i in range(len(recent_m5)):
+        row = recent_m5.iloc[i]
+        if direction == "LONG" and row["low"] < asia_low:
+            found_sweep = True
+            if sweep_extreme is None:
+                sweep_extreme = float(row["low"])
+            else:
+                sweep_extreme = min(sweep_extreme, float(row["low"]))
+        elif direction == "SHORT" and row["high"] > asia_high:
+            found_sweep = True
+            if sweep_extreme is None:
+                sweep_extreme = float(row["high"])
+            else:
+                sweep_extreme = max(sweep_extreme, float(row["high"]))
+        if found_sweep:
+            if direction == "LONG" and float(row["close"]) > asia_low:
+                close_back = True
+            elif direction == "SHORT" and float(row["close"]) < asia_high:
+                close_back = True
+
+    if not found_sweep:
+        log.debug("No M5 sweep of Asia extreme in last 20 candles — Asia Fade skip")
+        stats.record(_S, "no_sweep")
+        return None
+    if not close_back:
+        log.debug("No close back inside range after sweep — Asia Fade skip")
+        stats.record(_S, "no_reintegration")
+        return None
+
+    # Hard gate 4: current price back inside Asia range
+    if not (asia_low < current_price < asia_high):
+        log.debug("Price %.2f not inside Asia range [%.2f, %.2f] — Asia Fade skip",
+                  current_price, asia_low, asia_high)
+        stats.record(_S, "price_outside_range")
+        return None
+
+    # ── Soft confluences ────────────────────────────────────────────────────
+    confluences = ["Asia_Sweep"]
 
     h4_swings = find_swings(h4, lookback=cfg.SWING_LOOKBACK)
     h4_bias = determine_bias(h4_swings)
     expected = "BULLISH" if direction == "LONG" else "BEARISH"
-    if h4_bias != expected:
-        return None
+    if h4_bias == expected:
+        confluences.append("Bias_H4")
 
-    asia_high, asia_low = get_asia_range(m15)
-    if asia_high is None or asia_low is None:
-        return None
+    # SFP_Wick: last CLOSED M15 candle wicks beyond extreme and closes inside
+    if len(m15) >= 2:
+        m15_confirm = m15.iloc[-2]
+        if direction == "LONG":
+            sfp_wick = float(m15_confirm["low"]) < asia_low and float(m15_confirm["close"]) > asia_low
+        else:
+            sfp_wick = float(m15_confirm["high"]) > asia_high and float(m15_confirm["close"]) < asia_high
+        if sfp_wick:
+            confluences.append("SFP_Wick")
+            avg_vol = _avg_volume(m15.iloc[:-1], cfg.SFP_VOLUME_LOOKBACK)
+            if avg_vol is not None and "volume" in m15.columns:
+                if float(m15_confirm["volume"]) > cfg.SFP_VOLUME_FACTOR * avg_vol:
+                    confluences.append("Volume_Spike")
 
-    # Confirmation candle = last CLOSED M15 candle (iloc[-2]; iloc[-1] may be forming).
-    if len(m15) < 2:
-        return None
-    confirm = m15.iloc[-2]
-
-    # SFP geometry: wick beyond Asia extreme, close back inside the range.
-    if direction == "LONG":
-        wick_beyond = confirm["low"] < asia_low
-        closed_inside = confirm["close"] > asia_low
-        sweep_wick = confirm["low"]
-    else:
-        wick_beyond = confirm["high"] > asia_high
-        closed_inside = confirm["close"] < asia_high
-        sweep_wick = confirm["high"]
-
-    if not (wick_beyond and closed_inside):
-        return None
-
-    # Volume confirmation on the reintegration (confirmation) candle.
-    avg_vol = _avg_volume(m15.iloc[:-1], cfg.SFP_VOLUME_LOOKBACK)
-    if avg_vol is None:
-        return None
-    if "volume" not in m15.columns or confirm["volume"] <= cfg.SFP_VOLUME_FACTOR * avg_vol:
-        return None
-
-    # OTE filter: the sweep wick must sit in the OTE (0.618–0.786) retracement of
-    # the recent M15 leg. BUGFIX: the fib was previously anchored on the Asia
-    # extreme itself, putting the OTE zone strictly inside the range while the
-    # sweep wick is by definition beyond it — the check could never pass.
-    # The leg is now defined by the M15 swing extremes (leg low → leg high).
-    m15_swings = find_swings(m15, lookback=cfg.SWING_LOOKBACK)
-    current_price = m5.iloc[-1]["close"]
-    swing_h = max((s.price for s in m15_swings if s.type == "HIGH"), default=None)
-    swing_l = min((s.price for s in m15_swings if s.type == "LOW"), default=None)
-    if swing_h is None or swing_l is None or swing_h <= swing_l:
-        return None
-
-    if direction == "LONG":
-        # Up-leg swing_l → swing_h; sweep wick must be a 0.618–0.786 retracement.
-        fib = compute_fib_from_sweep(swing_l, swing_h, ote_low=cfg.OTE_LOW, ote_high=cfg.OTE_HIGH)
-    else:
-        # Down-leg swing_h → swing_l; sweep wick must be a 0.618–0.786 retracement.
-        fib = compute_fib_from_sweep_bearish(swing_h, swing_l, ote_low=cfg.OTE_LOW, ote_high=cfg.OTE_HIGH)
-
-    if not fib.is_in_ote(sweep_wick):
-        return None
-
-    # Optional FVG confluence on M5
-    m5_fvgs = detect_fvg(m5.iloc[-20:], min_size_pips=cfg.FVG_MIN_SIZE_PIPS)
+    # FVG_M5: unfilled FVG in trade direction within last 20 closed candles
+    m5_fvgs = detect_fvg(recent_m5, min_size_pips=cfg.FVG_MIN_SIZE_PIPS)
     fvg_dir = "BULLISH" if direction == "LONG" else "BEARISH"
     m5_fvgs = filter_unfilled_fvg(m5_fvgs, current_price)
-    recent_fvgs = get_recent_fvg(m5_fvgs, fvg_dir, n=2)
-
-    confluences = ["Bias_H4", "Asia_SFP", "Volume_Confirm", "OTE"]
+    recent_fvgs = get_recent_fvg(m5_fvgs, fvg_dir, n=3)
     if recent_fvgs:
         confluences.append("FVG_M5")
+
+    # Hard gate 6: score
     score = _score_confluences(confluences)
     if score < cfg.MIN_SCORE_A:
+        log.debug("Score %d < MIN_SCORE_A %d — Asia Fade skip", score, cfg.MIN_SCORE_A)
+        stats.record(_S, "score_below_min")
         return None
 
-    # Entry zone = the FVG if present, else the confirmation candle body back inside range.
+    # ── Entry zone: FVG (price inside) > fallback band ──────────────────────
+    entry_low: float | None = None
+    entry_high: float | None = None
+
     if recent_fvgs:
-        best = recent_fvgs[-1]
-        entry_low, entry_high = best.bottom, best.top
-    else:
-        entry_low = min(confirm["open"], confirm["close"])
-        entry_high = max(confirm["open"], confirm["close"])
+        best_fvg = recent_fvgs[-1]
+        if best_fvg.bottom <= current_price <= best_fvg.top:
+            entry_low, entry_high = best_fvg.bottom, best_fvg.top
 
-    buf = cfg.SFP_SL_BUFFER_PIPS * 0.10
+    if entry_low is None:
+        fade_zone = cfg.ASIA_FADE_ZONE_PIPS * _PIP
+        if direction == "LONG":
+            entry_low = asia_low
+            entry_high = asia_low + fade_zone
+        else:
+            entry_high = asia_high
+            entry_low = asia_high - fade_zone
+
+    # Hard gate 5: SL / TP, then worst-case RR
     if direction == "LONG":
-        sl = sweep_wick - buf
+        sl = sweep_extreme - cfg.SL_BUFFER  # type: ignore[operator]
         tp = asia_high
+        entry_ref = entry_high
     else:
-        sl = sweep_wick + buf
+        sl = sweep_extreme + cfg.SL_BUFFER  # type: ignore[operator]
         tp = asia_low
+        entry_ref = entry_low
 
-    entry_ref = entry_high if direction == "LONG" else entry_low
     rr = _safe_rr(tp, entry_ref, sl)
     if rr is None or rr < cfg.MIN_RR_A:
+        log.debug("RR %.2f < MIN_RR_A %.1f — Asia Fade skip", rr or 0, cfg.MIN_RR_A)
+        stats.record(_S, "rr_below_min")
         return None
 
+    stats.record(_S, "EMIT")
     return {
         "tier": "A",
         "direction": direction,
-        "pattern": "SFP + OTE Asia",
+        "pattern": "Asia Fade",
         "killzone": killzone,
         "entry_zone_low": round(entry_low, 2),
         "entry_zone_high": round(entry_high, 2),
         "stop_loss": round(sl, 2),
         "take_profit": round(tp, 2),
         "bias_h4": h4_bias,
-        "bias_h1": h4_bias,   # SFP Asia uses H4+M15 only — no H1 bias computed
+        "bias_h1": expected,
         "confluences": confluences,
         "confluence_score": score,
-        "estimated_winrate": 0.65,
+        "estimated_winrate": 0.62,
     }

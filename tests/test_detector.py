@@ -1,6 +1,7 @@
 """Unit tests for detector — no MT5 required."""
 import sys
 import os
+import unittest.mock as mock
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -317,7 +318,7 @@ def test_get_recent_choch_index_alignment():
 
 def test_sfp_ote_geometry():
     """
-    Documents the OTE geometry fix for scan_sfp_asia.
+    Documents the OTE geometry fix introduced when scan_asia_fade was designed.
 
     Setup: leg low=3300, leg high=3320 (range=20).
     BULLISH OTE zone: 0.618–0.786 retracement FROM swing_high DOWN.
@@ -395,3 +396,324 @@ def test_ob_not_excluded_by_forming_candle():
     obs2 = update_mitigation(obs2, df_full, lookback=len(df_full))
     assert obs2[0].touched, "Including the forming candle must set touched=True"
     assert get_nearest_ob(obs2, price=3303.0, direction="BULLISH") is None
+
+
+# ── Tier S: OTE fallback entry tests ──────────────────────────────────────────
+
+def _sw(type_: str, price: float):
+    """Create a minimal mock Swing for use in scanner monkeypatches."""
+    s = mock.MagicMock()
+    s.type = type_
+    s.price = price
+    return s
+
+
+def _patch_tier_s_indicators(monkeypatch, module, sweep_price=3300.0, swing_h=3400.0,
+                              h1_tp_high=3600.0):
+    """Apply monkeypatches for all indicator dependencies of scan_golden_setup."""
+    monkeypatch.setattr(module, "get_active_killzone", lambda *a, **kw: "NY_AM")
+    monkeypatch.setattr(module, "find_swing_liquidity", lambda *a, **kw: [])
+    monkeypatch.setattr(module, "detect_sweeps", lambda df, liq, **kw: liq)
+    monkeypatch.setattr(module, "determine_bias", lambda *a, **kw: "BULLISH")
+
+    _n = [0]
+    def patched_swings(df, **kw):
+        _n[0] += 1
+        if _n[0] == 2:  # H1 swings — needs high TP target to clear RR gate
+            return [_sw("HIGH", h1_tp_high), _sw("LOW", sweep_price)]
+        return [_sw("HIGH", swing_h), _sw("LOW", sweep_price)]
+    monkeypatch.setattr(module, "find_swings", patched_swings)
+
+    sweep_mock = mock.MagicMock()
+    sweep_mock.price = sweep_price
+    sweep_mock.sweep_time = pd.Timestamp("2024-01-15 13:30:00", tz="UTC")
+    monkeypatch.setattr(module, "get_recent_sweep", lambda liq, stype: sweep_mock)
+
+    sb_mock = mock.MagicMock()
+    sb_mock.direction = "BULLISH"
+    sb_mock.time = pd.Timestamp("2024-01-15 14:00:00", tz="UTC")
+    monkeypatch.setattr(module, "get_recent_structure_break", lambda *a, **kw: sb_mock)
+
+    monkeypatch.setattr(module, "detect_fvg", lambda *a, **kw: [])
+    monkeypatch.setattr(module, "filter_unfilled_fvg", lambda fvgs, *a, **kw: fvgs)
+    monkeypatch.setattr(module, "get_recent_fvg", lambda *a, **kw: [])
+    monkeypatch.setattr(module, "detect_order_blocks", lambda *a, **kw: [])
+    monkeypatch.setattr(module, "update_mitigation", lambda obs, *a, **kw: obs)
+    monkeypatch.setattr(module, "get_nearest_ob", lambda *a, **kw: None)
+
+
+def test_tier_s_ote_fallback_entry(monkeypatch):
+    """
+    Price in OTE, no FVG/OB → signal emitted using OTE band as entry zone.
+    Confluences: Bias_H4(2)+Bias_H1(2)+SSL_Sweep(3)+CHoCH_M5(2)+OTE(2) = 11 → capped 10.
+    """
+    import strategy.tier_s as m
+    from strategy.tier_s import scan_golden_setup
+    from indicators.fibonacci import compute_fib_from_sweep as _cfib
+
+    # sweep_low=3300, swing_h=3400 → OTE=[3321.4, 3338.2]; h1_tp=3600 for RR>2
+    _patch_tier_s_indicators(monkeypatch, m, sweep_price=3300.0, swing_h=3400.0, h1_tp_high=3600.0)
+
+    price = 3330.0  # inside OTE [3321.4, 3338.2]
+    rows = [{"open": price, "high": price + 1, "low": price - 1, "close": price}] * 50
+    df = _make_df(rows)
+    tf = {"M5": df, "M1": df, "H1": df, "H4": df}
+
+    result = scan_golden_setup(tf, "LONG")
+
+    assert result is not None, "Expected signal when price in OTE with no FVG/OB"
+    assert result["tier"] == "S"
+    assert result["pattern"] == "Golden Setup"
+    assert "FVG_M5" not in result["confluences"]
+    assert "OB_M5" not in result["confluences"]
+    assert any("OTE" in c for c in result["confluences"]), "OTE label must be in confluences"
+
+    fib = _cfib(3300.0, 3400.0, ote_low=0.618, ote_high=0.786)
+    assert abs(result["entry_zone_low"] - round(fib.ote_low, 2)) < 0.05
+    assert abs(result["entry_zone_high"] - round(fib.ote_high, 2)) < 0.05
+    assert result["confluence_score"] >= 7
+
+
+def test_tier_s_no_entry_zone_skips(monkeypatch):
+    """
+    Price outside OTE, no FVG/OB → no actionable entry zone → returns None.
+    """
+    import strategy.tier_s as m
+    from strategy.tier_s import scan_golden_setup
+
+    _patch_tier_s_indicators(monkeypatch, m, sweep_price=3300.0, swing_h=3400.0, h1_tp_high=3600.0)
+
+    price = 3350.0  # above OTE upper bound 3338.2 → not in OTE
+    rows = [{"open": price, "high": price + 1, "low": price - 1, "close": price}] * 50
+    df = _make_df(rows)
+    tf = {"M5": df, "M1": df, "H1": df, "H4": df}
+
+    result = scan_golden_setup(tf, "LONG")
+    assert result is None, "Expected None when price outside OTE with no FVG/OB"
+
+
+# ── Tier A: Asia Fade tests ────────────────────────────────────────────────────
+
+def test_asia_fade_long(monkeypatch):
+    """
+    Synthetic Asia range + sweep below asia_low + close back inside + price in range
+    → signal with pattern 'Asia Fade', SL below sweep wick, TP == asia_high,
+      'Asia_Sweep' in confluences.
+    """
+    import strategy.tier_a as m
+    from strategy.tier_a import scan_asia_fade
+
+    asia_low = 1900.0
+    asia_high = 1950.0
+    sweep_wick = 1895.0
+    current_price = 1920.0
+
+    monkeypatch.setattr(m, "get_active_killzone", lambda *a, **kw: "LONDON")
+    monkeypatch.setattr(m, "get_asia_range", lambda *a, **kw: (asia_high, asia_low))
+    monkeypatch.setattr(m, "find_swings", lambda *a, **kw: [_sw("HIGH", 1960.0), _sw("LOW", 1890.0)])
+    monkeypatch.setattr(m, "determine_bias", lambda *a, **kw: "BULLISH")
+    monkeypatch.setattr(m, "detect_fvg", lambda *a, **kw: [])
+    monkeypatch.setattr(m, "filter_unfilled_fvg", lambda fvgs, *a, **kw: fvgs)
+    monkeypatch.setattr(m, "get_recent_fvg", lambda *a, **kw: [])
+
+    # Build M5 dataframe: 28 normal + sweep + reintegration + forming
+    m5_rows = []
+    for _ in range(28):
+        m5_rows.append({"open": 1920, "high": 1925, "low": 1918, "close": 1922})
+    # sweep candle: wick below asia_low, close below asia_low (close-back in next candle)
+    m5_rows.append({"open": 1903, "high": 1905, "low": sweep_wick, "close": 1898})
+    # reintegration candle: closes back inside
+    m5_rows.append({"open": 1898, "high": 1910, "low": 1897, "close": 1908})
+    # forming candle (current)
+    m5_rows.append({"open": 1910, "high": 1925, "low": 1908, "close": current_price})
+
+    m5_df = _make_df(m5_rows)
+    m15_df = _make_df([{"open": 1920, "high": 1925, "low": 1918, "close": 1922}] * 20)
+    h4_df = _make_df([{"open": 1920, "high": 1925, "low": 1918, "close": 1922}] * 30)
+
+    tf = {"M5": m5_df, "M15": m15_df, "H4": h4_df}
+    result = scan_asia_fade(tf, "LONG")
+
+    assert result is not None, "Expected Asia Fade signal"
+    assert result["pattern"] == "Asia Fade"
+    assert result["tier"] == "A"
+    assert "Asia_Sweep" in result["confluences"]
+    assert result["stop_loss"] < sweep_wick, "SL must be below the sweep wick"
+    assert abs(result["take_profit"] - asia_high) < 0.01, "TP must equal asia_high"
+
+
+def test_asia_fade_range_too_small(monkeypatch):
+    """Asia range smaller than ASIA_MIN_RANGE_PIPS → returns None."""
+    import strategy.tier_a as m
+    from strategy.tier_a import scan_asia_fade
+
+    monkeypatch.setattr(m, "get_active_killzone", lambda *a, **kw: "LONDON")
+    # Range = 1.0 pip, threshold = 15 pips = 1.5 → too small
+    monkeypatch.setattr(m, "get_asia_range", lambda *a, **kw: (1901.0, 1900.0))
+
+    df = _make_df([{"open": 1900, "high": 1901, "low": 1899, "close": 1900}] * 30)
+    tf = {"M5": df, "M15": df, "H4": df}
+
+    result = scan_asia_fade(tf, "LONG")
+    assert result is None, "Expected None when Asia range is below minimum"
+
+
+# ── Stats module tests ─────────────────────────────────────────────────────────
+
+def test_stats_counters(caplog):
+    """record/tick smoke test: counters increment, summary logs at the every boundary."""
+    import logging
+    import stats as stats_mod
+
+    # Reset module state
+    stats_mod._counters.clear()
+    stats_mod._scan_count = 0
+
+    stats_mod.record("test_scanner", "EMIT")
+    stats_mod.record("test_scanner", "no_sweep")
+    stats_mod.record("test_scanner", "no_sweep")
+
+    assert stats_mod._counters["test_scanner"]["EMIT"] == 1
+    assert stats_mod._counters["test_scanner"]["no_sweep"] == 2
+
+    with caplog.at_level(logging.INFO, logger="stats"):
+        for _ in range(119):
+            stats_mod.tick(every=120)
+        assert not any("SCAN_STATS" in r.message for r in caplog.records), (
+            "Summary must NOT fire before the 120th tick"
+        )
+        stats_mod.tick(every=120)
+        assert any("SCAN_STATS" in r.message for r in caplog.records), (
+            "Summary MUST fire at the 120th tick"
+        )
+
+
+# ── ORB NY tests ───────────────────────────────────────────────────────────────
+
+import pytz as _pytz
+from strategy.orb import scan_orb_ny, _reset_daily_guard
+
+_NY_TZ_TEST = _pytz.timezone("America/New_York")
+
+
+def _make_orb_m5(candle_specs: list[dict]) -> pd.DataFrame:
+    """
+    Build a M5 dataframe with explicit NY-timestamped candles.
+    Each spec: {"ny_time": "HH:MM", "open": x, "high": x, "low": x, "close": x}
+    Date is fixed to 2024-06-12 (a Wednesday in summer, UTC-4).
+    Last row is the forming candle (same values as second-to-last, irrelevant).
+    """
+    date_str = "2024-06-12"
+    rows = []
+    for spec in candle_specs:
+        ny_dt = _NY_TZ_TEST.localize(
+            pd.Timestamp(f"{date_str} {spec['ny_time']}:00").to_pydatetime()
+        )
+        utc_dt = ny_dt.astimezone(_pytz.utc)
+        rows.append({
+            "time": utc_dt,
+            "open":  spec["open"],
+            "high":  spec["high"],
+            "low":   spec["low"],
+            "close": spec["close"],
+        })
+    df = pd.DataFrame(rows)
+    df["time"] = pd.to_datetime(df["time"], utc=True)
+    return df
+
+
+def _or_candles(or_high=3340.0, or_low=3330.0) -> list[dict]:
+    """Six OR candles covering 09:30–09:55 NY."""
+    times = ["09:30", "09:35", "09:40", "09:45", "09:50", "09:55"]
+    mid = (or_high + or_low) / 2
+    return [
+        {"ny_time": t, "open": mid, "high": or_high, "low": or_low, "close": mid}
+        for t in times
+    ]
+
+
+def test_orb_long_breakout():
+    """OR 09:30–10:00 high=3340/low=3330; candle at 10:05 closes 3341 → LONG signal."""
+    _reset_daily_guard()
+    or_high, or_low = 3340.0, 3330.0
+    specs = _or_candles(or_high, or_low)
+    # breakout candle (second-to-last = last closed)
+    specs.append({"ny_time": "10:05", "open": 3340.5, "high": 3342, "low": 3340, "close": 3341})
+    # forming candle (excluded)
+    specs.append({"ny_time": "10:10", "open": 3341, "high": 3343, "low": 3340, "close": 3341})
+
+    tf = {"M5": _make_orb_m5(specs)}
+    result = scan_orb_ny(tf, "LONG")
+
+    assert result is not None, "Expected LONG ORB signal"
+    assert result["tier"] == "ORB"
+    assert result["pattern"] == "ORB NY"
+    assert result["direction"] == "LONG"
+    assert result["stop_loss"] == pytest.approx(or_low, abs=0.01)
+    assert result["take_profit"] > or_high
+    assert "ORB_Breakout" in result["confluences"]
+
+
+def test_orb_range_too_small():
+    """OR range 0.5 (5 pips for XAUUSD) → None."""
+    _reset_daily_guard()
+    or_high, or_low = 3330.5, 3330.0  # 0.5 = 5 pips, threshold default=10 pips
+    specs = _or_candles(or_high, or_low)
+    specs.append({"ny_time": "10:05", "open": 3330.6, "high": 3331, "low": 3330, "close": 3331})
+    specs.append({"ny_time": "10:10", "open": 3331, "high": 3332, "low": 3330, "close": 3331})
+
+    tf = {"M5": _make_orb_m5(specs)}
+    result = scan_orb_ny(tf, "LONG")
+    assert result is None, "Expected None when OR range below minimum"
+
+
+def test_orb_no_signal_after_cutoff():
+    """Breakout candle closed at 12:05 NY → outside window → None."""
+    _reset_daily_guard()
+    specs = _or_candles()
+    # filler candles between 10:05 and 11:55
+    for hh_mm in ["10:05", "10:10", "10:15", "10:20", "11:50", "11:55"]:
+        specs.append({"ny_time": hh_mm, "open": 3339, "high": 3340, "low": 3338, "close": 3339})
+    # breakout at 12:05 NY (past cutoff) — will be last closed candle
+    specs.append({"ny_time": "12:05", "open": 3340, "high": 3342, "low": 3339, "close": 3341})
+    # forming candle
+    specs.append({"ny_time": "12:10", "open": 3341, "high": 3343, "low": 3340, "close": 3341})
+
+    tf = {"M5": _make_orb_m5(specs)}
+    result = scan_orb_ny(tf, "LONG")
+    assert result is None, "Expected None when last closed candle is past 12:00 NY cutoff"
+
+
+def test_orb_one_per_day():
+    """Second call same NY date same direction → None after first EMIT."""
+    _reset_daily_guard()
+    specs = _or_candles()
+    specs.append({"ny_time": "10:05", "open": 3340.5, "high": 3342, "low": 3340, "close": 3341})
+    specs.append({"ny_time": "10:10", "open": 3341, "high": 3343, "low": 3340, "close": 3341})
+
+    tf = {"M5": _make_orb_m5(specs)}
+
+    first = scan_orb_ny(tf, "LONG")
+    assert first is not None, "First call must return a signal"
+
+    second = scan_orb_ny(tf, "LONG")
+    assert second is None, "Second call same direction same day must return None"
+
+
+def test_orb_stale_breakout():
+    """Breakout happened 3 candles ago; current candle is back inside range → None."""
+    _reset_daily_guard()
+    specs = _or_candles()
+    # breakout happened 3 candles ago (not the most recent closed)
+    specs.append({"ny_time": "10:05", "open": 3340.5, "high": 3342, "low": 3340, "close": 3341})
+    # subsequent candles back inside range (do NOT break out)
+    specs.append({"ny_time": "10:10", "open": 3338, "high": 3339, "low": 3336, "close": 3337})
+    specs.append({"ny_time": "10:15", "open": 3337, "high": 3338, "low": 3335, "close": 3336})
+    # last closed candle (inside range, no breakout)
+    specs.append({"ny_time": "10:20", "open": 3336, "high": 3337, "low": 3334, "close": 3335})
+    # forming candle
+    specs.append({"ny_time": "10:25", "open": 3335, "high": 3336, "low": 3334, "close": 3335})
+
+    tf = {"M5": _make_orb_m5(specs)}
+    result = scan_orb_ny(tf, "LONG")
+    assert result is None, "Expected None when breakout candle is not the most recent closed"

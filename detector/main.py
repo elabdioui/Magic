@@ -13,10 +13,12 @@ import pytz
 from apscheduler.schedulers.blocking import BlockingScheduler
 
 import mt5_client as mt5
+import stats
 from config import cfg
 from strategy import (
-    scan_golden_setup, scan_ob_retest, scan_london_sweep, scan_sfp_asia,
+    scan_golden_setup, scan_ob_retest, scan_asia_fade,
     scan_breaker_fib, scan_bos_fvg, scan_break_retest,
+    scan_orb_ny,
     is_in_killzone, minutes_to_next_killzone, get_active_killzone,
 )
 from webhook import send_signal
@@ -46,10 +48,8 @@ _SCANNER_MAP = {
     "A": [
         lambda tf: scan_ob_retest(tf, "LONG"),
         lambda tf: scan_ob_retest(tf, "SHORT"),
-        lambda tf: scan_london_sweep(tf, "LONG"),
-        lambda tf: scan_london_sweep(tf, "SHORT"),
-        lambda tf: scan_sfp_asia(tf, "LONG"),
-        lambda tf: scan_sfp_asia(tf, "SHORT"),
+        lambda tf: scan_asia_fade(tf, "LONG"),
+        lambda tf: scan_asia_fade(tf, "SHORT"),
     ],
     "B": [
         lambda tf: scan_breaker_fib(tf, "LONG"),
@@ -61,6 +61,10 @@ _SCANNER_MAP = {
         lambda tf: scan_break_retest(tf, "LONG"),
         lambda tf: scan_break_retest(tf, "SHORT"),
     ],
+    "ORB": [
+        lambda tf: scan_orb_ny(tf, "LONG"),
+        lambda tf: scan_orb_ny(tf, "SHORT"),
+    ],
 }
 
 _last_sent: dict[str, datetime] = {}
@@ -69,6 +73,7 @@ _COOLDOWN_BY_TIER = {
     "A": 300,        # 5 min
     "B": 300,        # 5 min
     "SWING": 14400,  # 4 h — un setup swing reste valide longtemps
+    "ORB": 300,      # 5 min (daily guard in the module is the primary de-dup)
 }
 _DEFAULT_COOLDOWN = 300
 
@@ -140,6 +145,8 @@ def scan_once() -> None:
                 _last_sent[_cooldown_key(result)] = now_utc
                 found_any = True
                 break  # one signal per scan per tier
+
+    stats.tick()
 
     if not found_any:
         log.debug("No valid signal this scan")

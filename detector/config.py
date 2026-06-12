@@ -25,7 +25,7 @@ class Config:
     SHEETS_WEBHOOK_URL: str = os.getenv("SHEETS_WEBHOOK_URL", "")
     SHEETS_WEBHOOK_TOKEN: str = os.getenv("SHEETS_WEBHOOK_TOKEN", "")
 
-    ENABLED_TIERS: list[str] = os.getenv("ENABLED_TIERS", "S,A,B").split(",")
+    ENABLED_TIERS: list[str] = os.getenv("ENABLED_TIERS", "S,A,B,ORB").split(",")
     ENABLED_KILLZONES: list[str] = os.getenv("ENABLED_KILLZONES", "LONDON,NY_AM,NY_PM").split(",")
 
     TIMEZONE: str = os.getenv("TIMEZONE", "Africa/Casablanca")
@@ -53,7 +53,7 @@ class Config:
     MIN_SCORE_A: int = 5   # Tier A: moderate
     MIN_SCORE_B: int = 4   # Tier B: baseline
     MIN_RR: float = 1.5    # minimum risk/reward ratio (worst-case fill)
-    MIN_RR_A: float = 2.0  # Tier A SFP minimum RR (scan_sfp_asia)
+    MIN_RR_A: float = 2.0  # Tier A minimum RR (Asia Fade, OB Retest)
     MIN_RR_S: float = 2.0  # Tier S Golden Setup minimum RR (worst-case edge)
     SL_BUFFER: float = 0.30  # distance beyond zone edge for stop-loss (3 pips × 0.10)
     REGIME_ATR_PERIOD: int = 14          # ATR look-back for regime detection
@@ -72,6 +72,8 @@ class Config:
         "Asia_Sweep":   3,
         "Asia_SFP":     2,
         "Volume_Confirm": 1,
+        "SFP_Wick":     1,
+        "Volume_Spike": 1,
         # Tier S
         "Bias_H1":      2,
         "OB_M5":        2,
@@ -91,6 +93,15 @@ class Config:
     SFP_VOLUME_LOOKBACK: int = 10       # candles for the avg-volume baseline
     SFP_VOLUME_FACTOR: float = 1.0      # reintegration candle vol > factor * avg
     SFP_SL_BUFFER_PIPS: float = 8.0     # 5–10 pip range from the doc
+
+    # ORB NY (Opening Range Breakout) — 3 tunable params, no ICT confluences
+    ORB_WINDOW_MINUTES: int = int(os.getenv("ORB_WINDOW_MINUTES", "30"))
+    ORB_TP_R: float = float(os.getenv("ORB_TP_R", "1.5"))
+    ORB_MIN_RANGE_PIPS: float = float(os.getenv("ORB_MIN_RANGE_PIPS", "10"))
+
+    # Asia Fade (Tier A)
+    ASIA_MIN_RANGE_PIPS: float = float(os.getenv("ASIA_MIN_RANGE_PIPS", "15.0"))
+    ASIA_FADE_ZONE_PIPS: float = float(os.getenv("ASIA_FADE_ZONE_PIPS", "5.0"))
 
     # Break & Retest S/R (Tier SWING new)
     SR_MIN_REJECTIONS: int = 2          # min swings clustering to call it an S/R level

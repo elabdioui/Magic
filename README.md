@@ -1,8 +1,4 @@
-# xauusd-bot
 
-Automated XAUUSD signal detector + FastAPI backend.
-
----
 
 ## Operations
 
